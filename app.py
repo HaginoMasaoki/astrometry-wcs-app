@@ -168,13 +168,10 @@ def draw_constellations(image, wcs, output_plot_path):
         hip_to_pix = {}
 
     fig = plt.figure(figsize=(10, 10 * (height / width)))
-    # WCS投影を適用してグリッドや軸を描画できるようにする
     ax = fig.add_subplot(111, projection=wcs)
     
-    # 画像を描画
     ax.imshow(image, origin='lower')
 
-    # 星座線の描画
     for h1, h2 in edges:
         if h1 in hip_to_pix and h2 in hip_to_pix:
             pt1 = hip_to_pix[h1]
@@ -187,7 +184,6 @@ def draw_constellations(image, wcs, output_plot_path):
                     color='cyan', linestyle='-', linewidth=1.2, alpha=0.75
                 )
 
-    # 標準星のリストアップとマーカー描画
     star_list = []
     if len(filtered_df) > 0:
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
@@ -207,7 +203,6 @@ def draw_constellations(image, wcs, output_plot_path):
     ax.set_xlim(0, width)
     ax.set_ylim(0, height)
     
-    # グリッド線と座標軸の有効化
     ax.coords.grid(True, color='white', alpha=0.3, linestyle='solid')
     ax.coords[0].set_axislabel('RA (J2000)')
     ax.coords[1].set_axislabel('Dec (J2000)')
@@ -216,7 +211,6 @@ def draw_constellations(image, wcs, output_plot_path):
     plt.savefig(output_plot_path, dpi=150)
     plt.close()
 
-    # 推定限界等級の算出
     faintest_mag_str = "判定不能"
     if len(filtered_df) > 0:
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
@@ -236,6 +230,11 @@ st.write("Astrometry.net APIを利用してオンラインでプレートソル�
 api_key = get_api_key()
 
 uploaded_file = st.file_uploader("解析する星空画像を選択してください", type=["jpg", "jpeg", "png", "tif", "fits"])
+
+# ファイルが新しくアップロードされたらセッション状態をリセット
+if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file:
+    st.session_state.current_file = uploaded_file
+    st.session_state.is_solved = False
 
 if uploaded_file is not None:
     col1, col2 = st.columns(2)
@@ -264,7 +263,6 @@ if uploaded_file is not None:
             output_plot_path = "constellation_sky.png"
             output_hdr_path = "wcs_header.txt"
 
-            # WCSヘッダーテキストの保存
             with open(output_hdr_path, "w", encoding="utf-8") as f:
                 f.write(wcs_header_str)
             
@@ -272,8 +270,6 @@ if uploaded_file is not None:
 
             status_placeholder.info("星座重ね合わせ画像を生成中...")
             faintest_mag_str, star_list = draw_constellations(image, wcs, output_plot_path)
-
-            status_placeholder.success("全処理が完了しました！")
 
             # 視野角（FOV）・中心座標の計算
             width, height = image.size
@@ -291,66 +287,26 @@ if uploaded_file is not None:
             fov_diag_deg = coord_bl.separation(coord_tr).deg
             scale_arcsec = (fov_w_deg * 3600.0) / width
 
-            # 結果表示
-            with col2:
-                st.image(output_plot_path, caption="解析結果 (グリッド・星座線表示)", use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("解析データ")
-            
-            res_col1, res_col2 = st.columns(2)
-            with res_col1:
-                st.markdown("**撮影中心座標**")
-                st.write(f"- 赤経 (RA): `{ra_str}`")
-                st.write(f"- 赤緯 (Dec): `{dec_str}`")
-            
-            with res_col2:
-                st.markdown("**視野角（FOV）& 画像領域情報**")
-                st.write(f"- 視野サイズ: `{fov_w_deg:.2f}° × {fov_h_deg:.2f}°` (対角: `{fov_diag_deg:.2f}°`)")
-                st.write(f"- ピクセルスケール: `{scale_arcsec:.2f} arcsec/pixel`")
-                st.write(f"- 推定限界等級: `{faintest_mag_str}`")
+            # 結果を session_state に保存してリセットを防ぐ
+            st.session_state.is_solved = True
+            st.session_state.ra_str = ra_str
+            st.session_state.dec_str = dec_str
+            st.session_state.fov_w_deg = fov_w_deg
+            st.session_state.fov_h_deg = fov_h_deg
+            st.session_state.fov_diag_deg = fov_diag_deg
+            st.session_state.scale_arcsec = scale_arcsec
+            st.session_state.faintest_mag_str = faintest_mag_str
+            st.session_state.star_list = star_list
+            st.session_state.output_plot_path = output_plot_path
+            st.session_state.output_fits_path = output_fits_path
+            st.session_state.output_hdr_path = output_hdr_path
 
-            # 画角内の標準星リストの表示
-            st.markdown("**画角内の主要標準星 (4.0等星以上)**")
-            if star_list:
-                st.text("\n".join(star_list))
-            else:
-                st.write("画角内に該当する主要標準星はありません。")
-
-            st.markdown("---")
-            st.subheader("ダウンロード")
-
-            d_col1, d_col2, d_col3 = st.columns(3)
-
-            # 1. 星座付き画像ダウンロード
-            with d_col1:
-                with open(output_plot_path, "rb") as f:
-                    st.download_button(
-                        label="星座付き画像をダウンロード (PNG)",
-                        data=f,
-                        file_name=f"{Path(uploaded_file.name).stem}_constellations.png",
-                        mime="image/png"
-                    )
-
-            # 2. FITSファイルダウンロード
-            with d_col2:
-                with open(output_fits_path, "rb") as f:
-                    st.download_button(
-                        label="WCS入り FITS をダウンロード",
-                        data=f,
-                        file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
-                        mime="application/fits"
-                    )
-
-            # 3. WCSヘッダーテキストダウンロード
-            with d_col3:
-                with open(output_hdr_path, "rb") as f:
-                    st.download_button(
-                        label="WCS ヘッダー情報をダウンロード (TXT)",
-                        data=f,
-                        file_name=f"{Path(uploaded_file.name).stem}_header.txt",
-                        mime="text/plain"
-                    )
+            status_placeholder.success("全処理が完了しました！")
 
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
+
+    # すでに解決済みの場合はボタン以外でも結果を表示・維持する
+    if st.session_state.get("is_solved", False):
+        with col2:
+            st.image(st.session_state.output_plot_path, caption="解析結果 (グリッド・星座線表示)", use_container_width=True)
