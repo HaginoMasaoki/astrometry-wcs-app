@@ -23,7 +23,7 @@ warnings.simplefilter('ignore', category=FITSFixedWarning)
 warnings.filterwarnings('ignore', message='.*Some non-standard WCS keywords were excluded.*')
 
 # Page Configuration
-st.set_page_config(page_title="Astrometry WCS Solver", page_icon="??", layout="wide")
+st.set_page_config(page_title="Astrometry WCS Solver", page_icon="🌌", layout="wide")
 
 # ==========================================
 # 1. API Key の安全な取得 (Streamlit Secrets)
@@ -160,7 +160,9 @@ def draw_annotations(image, wcs, output_plot_path):
     filtered_coords = all_coords[near_mask]
 
     if len(filtered_coords) > 0:
-        pix_x, pix_y = wcs.world_to_pixel(filtered_coords)
+        raw_x, raw_y = wcs.world_to_pixel(filtered_coords)
+        pix_x = raw_x
+        pix_y = height - raw_y  # 上下軸反転の補正
         hip_to_pix = {hip_id: (x, y) for hip_id, x, y in zip(filtered_df.index, pix_x, pix_y)}
     else:
         hip_to_pix = {}
@@ -168,7 +170,7 @@ def draw_annotations(image, wcs, output_plot_path):
     fig = plt.figure(figsize=(10, 10 * (height / width)))
     ax = fig.add_subplot(111, projection=wcs)
     
-    # 描画 (WCSAxes の標準で描画)
+    # 描画 (origin='lower' で統一)
     ax.imshow(image, origin='lower')
 
     line_drawn = False
@@ -219,7 +221,7 @@ def draw_annotations(image, wcs, output_plot_path):
 # ==========================================
 # 5. Streamlit メイン UI
 # ==========================================
-st.title("?? Astrometry.net Cloud Plate Solver")
+st.title("Astrometry.net Cloud Plate Solver")
 st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、星表・星座線をオーバーレイ表示します。")
 
 # APIキーの検証
@@ -232,7 +234,7 @@ if uploaded_file is not None:
     
     image = Image.open(uploaded_file)
     with col1:
-        st.image(image, caption="アップロード画像", use_column_width=True)
+        st.image(image, caption="アップロード画像", use_container_width=True)
 
     if st.button("プレートソルブを実行", type="primary"):
         status_placeholder = st.empty()
@@ -270,16 +272,16 @@ if uploaded_file is not None:
 
             # 結果表示
             with col2:
-                st.image(output_plot_path, caption="解析結果 (アノテーション付き)", use_column_width=True)
+                st.image(output_plot_path, caption="解析結果 (アノテーション付き)", use_container_width=True)
             
             st.markdown("---")
-            st.subheader("?? 解析データ")
+            st.subheader("解析データ")
             st.write(f"**撮影中心座標:** 赤経 (RA): `{ra_str}` / 赤緯 (Dec): `{dec_str}`")
 
-            # FITSファイルのダウンロードボタン
+            # FITSファイルのダウンロードボタン（文字化けを防ぐため標準テキストに変更）
             with open(output_fits_path, "rb") as f:
                 st.download_button(
-                    label="?? WCS入り FITS ファイルをダウンロード",
+                    label="WCS入り FITS ファイルをダウンロード",
                     data=f,
                     file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
                     mime="application/fits"
