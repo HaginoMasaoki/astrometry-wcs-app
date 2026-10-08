@@ -231,9 +231,10 @@ api_key = get_api_key()
 
 uploaded_file = st.file_uploader("解析する星空画像を選択してください", type=["jpg", "jpeg", "png", "tif", "fits"])
 
-# ファイルが新しくアップロードされたらセッション状態をリセット
-if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file:
-    st.session_state.current_file = uploaded_file
+# ファイルが一意に変わった場合のみセッション状態をリセット
+file_id = f"{uploaded_file.name}-{uploaded_file.size}" if uploaded_file else None
+if "current_file_id" not in st.session_state or st.session_state.current_file_id != file_id:
+    st.session_state.current_file_id = file_id
     st.session_state.is_solved = False
 
 if uploaded_file is not None:
@@ -243,7 +244,7 @@ if uploaded_file is not None:
     with col1:
         st.image(image, caption="アップロード画像", use_container_width=True)
 
-    if st.button("プレートソルブを実行", type="primary"):
+    if st.button("Run Plate Solving", type="primary"):
         status_placeholder = st.empty()
         
         try:
@@ -287,7 +288,7 @@ if uploaded_file is not None:
             fov_diag_deg = coord_bl.separation(coord_tr).deg
             scale_arcsec = (fov_w_deg * 3600.0) / width
 
-            # 結果を session_state に保存してリセットを防ぐ
+            # 結果を session_state に保存
             st.session_state.is_solved = True
             st.session_state.ra_str = ra_str
             st.session_state.dec_str = dec_str
@@ -306,7 +307,60 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
 
-    # すでに解決済みの場合はボタン以外でも結果を表示・維持する
+    # 解決済みの場合はボタン以外（ダウンロード等）でも状態を維持して表示
     if st.session_state.get("is_solved", False):
         with col2:
             st.image(st.session_state.output_plot_path, caption="解析結果 (グリッド・星座線表示)", use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("解析データ")
+        
+        res_col1, res_col2 = st.columns(2)
+        with res_col1:
+            st.markdown("**撮影中心座標**")
+            st.write(f"- 赤経 (RA): `{st.session_state.ra_str}`")
+            st.write(f"- 赤緯 (Dec): `{st.session_state.dec_str}`")
+        
+        with res_col2:
+            st.markdown("**視野角（FOV）& 画像領域情報**")
+            st.write(f"- 視野サイズ: `{st.session_state.fov_w_deg:.2f}° × {st.session_state.fov_h_deg:.2f}°` (対角: `{st.session_state.fov_diag_deg:.2f}°`)")
+            st.write(f"- ピクセルスケール: `{st.session_state.scale_arcsec:.2f} arcsec/pixel`")
+            st.write(f"- 推定限界等級: `{st.session_state.faintest_mag_str}`")
+
+        st.markdown("**画角内の主要標準星 (4.0等星以上)**")
+        if st.session_state.star_list:
+            st.text("\n".join(st.session_state.star_list))
+        else:
+            st.write("画角内に該当する主要標準星はありません。")
+
+        st.markdown("---")
+        st.subheader("ダウンロード")
+
+        d_col1, d_col2, d_col3 = st.columns(3)
+
+        with d_col1:
+            with open(st.session_state.output_plot_path, "rb") as f:
+                st.download_button(
+                    label="星座付き画像をダウンロード (PNG)",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_constellations.png",
+                    mime="image/png"
+                )
+
+        with d_col2:
+            with open(st.session_state.output_fits_path, "rb") as f:
+                st.download_button(
+                    label="WCS入り FITS をダウンロード",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
+                    mime="application/fits"
+                )
+
+        with d_col3:
+            with open(st.session_state.output_hdr_path, "rb") as f:
+                st.download_button(
+                    label="WCS ヘッダー情報をダウンロード (TXT)",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_header.txt",
+                    mime="text/plain"
+                )
