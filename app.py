@@ -140,6 +140,12 @@ def save_as_fits(image, wcs_header_str, output_fits_path):
     hdu.writeto(output_fits_path, overwrite=True)
     return wcs
 
+def format_wcs_header_to_lines(header_str):
+    """FITSヘッダーの文字列を80文字ごとに分割して改行を入れる"""
+    # 80文字ずつのブロックに分割してリスト内包表記で改行を結合
+    lines = [header_str[i:i+80] for i in range(0, len(header_str), 80)]
+    return "\n".join(lines)
+
 def draw_constellations(image, wcs, output_plot_path):
     width, height = image.size
     stars_df, edges = load_stellarium_constellations()
@@ -224,7 +230,7 @@ def draw_constellations(image, wcs, output_plot_path):
 # ==========================================
 # 5. Streamlit メイン UI
 # ==========================================
-st.title("Astrometry.net Plate Solver")
+st.title("Plate Solver")
 st.write("Astrometry.net APIを利用してオンラインでPlate Solvingを行い、グリッド付きの星座線を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
@@ -264,8 +270,10 @@ if uploaded_file is not None:
             output_plot_path = "constellation_sky.png"
             output_hdr_path = "wcs_header.txt"
 
+            # 80文字ごとに改行を入れてTXTファイルに保存
+            formatted_header = format_wcs_header_to_lines(wcs_header_str)
             with open(output_hdr_path, "w", encoding="utf-8") as f:
-                f.write(wcs_header_str)
+                f.write(formatted_header)
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
