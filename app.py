@@ -22,7 +22,7 @@ from skyfield.data import hipparcos, stellarium
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 warnings.filterwarnings('ignore', message='.*Some non-standard WCS keywords were excluded.*')
 
-# Page Configuration
+# ページ設定
 st.set_page_config(page_title="Astrometry WCS Solver", page_icon="🌌", layout="wide")
 
 # ==========================================
@@ -127,7 +127,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 4. FITS保存 & アノテーション描画・解析
+# 4. FITS保存 & 星座線の重ね描き・解析 (グリッド・軸付き)
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -140,7 +140,7 @@ def save_as_fits(image, wcs_header_str, output_fits_path):
     hdu.writeto(output_fits_path, overwrite=True)
     return wcs
 
-def draw_annotations(image, wcs, output_plot_path):
+def draw_constellations(image, wcs, output_plot_path):
     width, height = image.size
     stars_df, edges = load_stellarium_constellations()
 
@@ -168,11 +168,13 @@ def draw_annotations(image, wcs, output_plot_path):
         hip_to_pix = {}
 
     fig = plt.figure(figsize=(10, 10 * (height / width)))
+    # WCS投影を適用してグリッドや軸を描画できるようにする
     ax = fig.add_subplot(111, projection=wcs)
     
+    # 画像を描画
     ax.imshow(image, origin='lower')
 
-    line_drawn = False
+    # 星座線の描画
     for h1, h2 in edges:
         if h1 in hip_to_pix and h2 in hip_to_pix:
             pt1 = hip_to_pix[h1]
@@ -182,33 +184,30 @@ def draw_annotations(image, wcs, output_plot_path):
                (0 <= pt2[0] < width and 0 <= pt2[1] < height):
                 ax.plot(
                     [pt1[0], pt2[0]], [pt1[1], pt2[1]], 
-                    color='cyan', linestyle='-', linewidth=1.2, alpha=0.75,
-                    label='Constellation Line' if not line_drawn else ""
+                    color='cyan', linestyle='-', linewidth=1.2, alpha=0.75
                 )
-                line_drawn = True
 
+    # 標準星のリストアップとマーカー描画
+    star_list = []
     if len(filtered_df) > 0:
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
         bright_mask = inside_mask & (filtered_df['magnitude'].values < 4.0)
 
         ax.scatter(
             pix_x[bright_mask], pix_y[bright_mask], 
-            edgecolor='yellow', facecolor='none', s=45, linewidth=1.0, 
-            label='Standard Stars'
+            edgecolor='yellow', facecolor='none', s=45, linewidth=1.0
         )
 
-        for hip_id, x, y, vmag in zip(
+        for hip_id, vmag in zip(
             filtered_df.index[bright_mask], 
-            pix_x[bright_mask], 
-            pix_y[bright_mask], 
             filtered_df['magnitude'].values[bright_mask]
         ):
-            tx = min(x + 7, width - 60)
-            ty = min(y + 7, height - 20)
-            ax.text(tx, ty, f"HIP {hip_id}\n({vmag:.1f}m)", color='yellow', fontsize=6, weight='bold', alpha=0.9)
+            star_list.append(f"HIP {hip_id} ({vmag:.1f}m)")
 
     ax.set_xlim(0, width)
     ax.set_ylim(0, height)
+    
+    # グリッド線と座標軸の有効化
     ax.coords.grid(True, color='white', alpha=0.3, linestyle='solid')
     ax.coords[0].set_axislabel('RA (J2000)')
     ax.coords[1].set_axislabel('Dec (J2000)')
@@ -226,13 +225,13 @@ def draw_annotations(image, wcs, output_plot_path):
             faintest_mag = np.max(visible_mags)
             faintest_mag_str = f"{faintest_mag:.1f} 等級（HIP星表基準）"
 
-    return faintest_mag_str
+    return faintest_mag_str, star_list
 
 # ==========================================
 # 5. Streamlit メイン UI
 # ==========================================
 st.title("Astrometry.net Cloud Plate Solver")
-st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、星表・星座線をオーバーレイ表示します。")
+st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、グリッド付きの星座線を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
 
@@ -262,12 +261,17 @@ if uploaded_file is not None:
             wcs_header_str = get_wcs_header(job_id)
             
             output_fits_path = "output_wcs.fits"
-            output_plot_path = "annotated_sky.png"
+            output_plot_path = "constellation_sky.png"
+            output_hdr_path = "wcs_header.txt"
+
+            # WCSヘッダーテキストの保存
+            with open(output_hdr_path, "w", encoding="utf-8") as f:
+                f.write(wcs_header_str)
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
-            status_placeholder.info("アノテーション画像を生成中...")
-            faintest_mag_str = draw_annotations(image, wcs, output_plot_path)
+            status_placeholder.info("星座重ね合わせ画像を生成中...")
+            faintest_mag_str, star_list = draw_constellations(image, wcs, output_plot_path)
 
             status_placeholder.success("全処理が完了しました！")
 
@@ -289,7 +293,7 @@ if uploaded_file is not None:
 
             # 結果表示
             with col2:
-                st.image(output_plot_path, caption="解析結果 (アノテーション付き)", use_container_width=True)
+                st.image(output_plot_path, caption="解析結果 (グリッド・星座線表示)", use_container_width=True)
             
             st.markdown("---")
             st.subheader("解析データ")
@@ -306,13 +310,47 @@ if uploaded_file is not None:
                 st.write(f"- ピクセルスケール: `{scale_arcsec:.2f} arcsec/pixel`")
                 st.write(f"- 推定限界等級: `{faintest_mag_str}`")
 
-            with open(output_fits_path, "rb") as f:
-                st.download_button(
-                    label="WCS入り FITS ファイルをダウンロード",
-                    data=f,
-                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
-                    mime="application/fits"
-                )
+            # 画角内の標準星リストの表示
+            st.markdown("**画角内の主要標準星 (4.0等星以上)**")
+            if star_list:
+                st.text("\n".join(star_list))
+            else:
+                st.write("画角内に該当する主要標準星はありません。")
+
+            st.markdown("---")
+            st.subheader("ダウンロード")
+
+            d_col1, d_col2, d_col3 = st.columns(3)
+
+            # 1. 星座付き画像ダウンロード
+            with d_col1:
+                with open(output_plot_path, "rb") as f:
+                    st.download_button(
+                        label="星座付き画像をダウンロード (PNG)",
+                        data=f,
+                        file_name=f"{Path(uploaded_file.name).stem}_constellations.png",
+                        mime="image/png"
+                    )
+
+            # 2. FITSファイルダウンロード
+            with d_col2:
+                with open(output_fits_path, "rb") as f:
+                    st.download_button(
+                        label="WCS入り FITS をダウンロード",
+                        data=f,
+                        file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
+                        mime="application/fits"
+                    )
+
+            # 3. WCSヘッダーテキストダウンロード
+            with d_col3:
+                with open(output_hdr_path, "rb") as f:
+                    st.download_button(
+                        label="WCS ヘッダー情報をダウンロード (TXT)",
+                        data=f,
+                        file_name=f"{Path(uploaded_file.name).stem}_header.txt",
+                        mime="text/plain"
+                    )
 
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
