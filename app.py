@@ -224,8 +224,8 @@ def draw_constellations(image, wcs, output_plot_path):
 # ==========================================
 # 5. Streamlit メイン UI
 # ==========================================
-st.title("Astrometry.net Cloud Plate Solver")
-st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、グリッド付きの星座線を重ね合わせた画像を生成します。")
+st.title("Astrometry.net Plate Solver")
+st.write("Astrometry.net APIを利用してオンラインでPlate Solvingを行い、グリッド付きの星座線を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
 
