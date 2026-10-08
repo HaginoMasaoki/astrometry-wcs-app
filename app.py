@@ -161,4 +161,158 @@ def draw_annotations(image, wcs, output_plot_path):
 
     if len(filtered_coords) > 0:
         raw_x, raw_y = wcs.world_to_pixel(filtered_coords)
-        pix_x =
+        pix_x = raw_x
+        pix_y = height - raw_y  # 上下軸反転の補正
+        hip_to_pix = {hip_id: (x, y) for hip_id, x, y in zip(filtered_df.index, pix_x, pix_y)}
+    else:
+        hip_to_pix = {}
+
+    fig = plt.figure(figsize=(10, 10 * (height / width)))
+    ax = fig.add_subplot(111, projection=wcs)
+    
+    ax.imshow(image, origin='lower')
+
+    line_drawn = False
+    for h1, h2 in edges:
+        if h1 in hip_to_pix and h2 in hip_to_pix:
+            pt1 = hip_to_pix[h1]
+            pt2 = hip_to_pix[h2]
+
+            if (0 <= pt1[0] < width and 0 <= pt1[1] < height) or \
+               (0 <= pt2[0] < width and 0 <= pt2[1] < height):
+                ax.plot(
+                    [pt1[0], pt2[0]], [pt1[1], pt2[1]], 
+                    color='cyan', linestyle='-', linewidth=1.2, alpha=0.75,
+                    label='Constellation Line' if not line_drawn else ""
+                )
+                line_drawn = True
+
+    if len(filtered_df) > 0:
+        inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
+        bright_mask = inside_mask & (filtered_df['magnitude'].values < 4.0)
+
+        ax.scatter(
+            pix_x[bright_mask], pix_y[bright_mask], 
+            edgecolor='yellow', facecolor='none', s=45, linewidth=1.0, 
+            label='Standard Stars'
+        )
+
+        for hip_id, x, y, vmag in zip(
+            filtered_df.index[bright_mask], 
+            pix_x[bright_mask], 
+            pix_y[bright_mask], 
+            filtered_df['magnitude'].values[bright_mask]
+        ):
+            tx = min(x + 7, width - 60)
+            ty = min(y + 7, height - 20)
+            ax.text(tx, ty, f"HIP {hip_id}\n({vmag:.1f}m)", color='yellow', fontsize=6, weight='bold', alpha=0.9)
+
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.coords.grid(True, color='white', alpha=0.3, linestyle='solid')
+    ax.coords[0].set_axislabel('RA (J2000)')
+    ax.coords[1].set_axislabel('Dec (J2000)')
+    
+    plt.tight_layout()
+    plt.savefig(output_plot_path, dpi=150)
+    plt.close()
+
+    # 推定限界等級の算出
+    faintest_mag_str = "判定不能"
+    if len(filtered_df) > 0:
+        inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
+        visible_mags = filtered_df['magnitude'].values[inside_mask]
+        if len(visible_mags) > 0:
+            faintest_mag = np.max(visible_mags)
+            faintest_mag_str = f"{faintest_mag:.1f} 等級（HIP星表基準）"
+
+    return faintest_mag_str
+
+# ==========================================
+# 5. Streamlit メイン UI
+# ==========================================
+st.title("Astrometry.net Cloud Plate Solver")
+st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、星表・星座線をオーバーレイ表示します。")
+
+api_key = get_api_key()
+
+uploaded_file = st.file_uploader("解析する星空画像を選択してください", type=["jpg", "jpeg", "png", "tif", "fits"])
+
+if uploaded_file is not None:
+    col1, col2 = st.columns(2)
+    
+    image = Image.open(uploaded_file)
+    with col1:
+        st.image(image, caption="アップロード画像", use_container_width=True)
+
+    if st.button("プレートソルブを実行", type="primary"):
+        status_placeholder = st.empty()
+        
+        try:
+            status_placeholder.info("Astrometry.net にログイン中...")
+            session_token = get_session_token(api_key)
+            
+            status_placeholder.info("画像をアップロード中...")
+            uploaded_file.seek(0)
+            subid = upload_image(session_token, uploaded_file.getvalue())
+            
+            job_id = wait_for_job(subid, status_placeholder)
+            
+            status_placeholder.info("WCSヘッダーを取得中...")
+            wcs_header_str = get_wcs_header(job_id)
+            
+            output_fits_path = "output_wcs.fits"
+            output_plot_path = "annotated_sky.png"
+            
+            wcs = save_as_fits(image, wcs_header_str, output_fits_path)
+
+            status_placeholder.info("アノテーション画像を生成中...")
+            faintest_mag_str = draw_annotations(image, wcs, output_plot_path)
+
+            status_placeholder.success("全処理が完了しました！")
+
+            # 視野角（FOV）・中心座標の計算
+            width, height = image.size
+            center_coord = wcs.pixel_to_world(width / 2, height / 2)
+            ra_str = center_coord.ra.to_string(unit=u.hour, sep='hms', precision=1)
+            dec_str = center_coord.dec.to_string(unit=u.deg, sep='dms', precision=1)
+
+            coord_tl = wcs.pixel_to_world(0, height)
+            coord_tr = wcs.pixel_to_world(width, height)
+            coord_bl = wcs.pixel_to_world(0, 0)
+            coord_br = wcs.pixel_to_world(width, 0)
+
+            fov_w_deg = (coord_bl.separation(coord_br).deg + coord_tl.separation(coord_tr).deg) / 2.0
+            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_tr).deg) / 2.0
+            fov_diag_deg = coord_bl.separation(coord_tr).deg
+            scale_arcsec = (fov_w_deg * 3600.0) / width
+
+            # 結果表示
+            with col2:
+                st.image(output_plot_path, caption="解析結果 (アノテーション付き)", use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("解析データ")
+            
+            res_col1, res_col2 = st.columns(2)
+            with res_col1:
+                st.markdown("**撮影中心座標**")
+                st.write(f"- 赤経 (RA): `{ra_str}`")
+                st.write(f"- 赤緯 (Dec): `{dec_str}`")
+            
+            with res_col2:
+                st.markdown("**視野角（FOV）& 画像領域情報**")
+                st.write(f"- 視野サイズ: `{fov_w_deg:.2f}° × {fov_h_deg:.2f}°` (対角: `{fov_diag_deg:.2f}°`)")
+                st.write(f"- ピクセルスケール: `{scale_arcsec:.2f} arcsec/pixel`")
+                st.write(f"- 推定限界等級: `{faintest_mag_str}`")
+
+            with open(output_fits_path, "rb") as f:
+                st.download_button(
+                    label="WCS入り FITS ファイルをダウンロード",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
+                    mime="application/fits"
+                )
+
+        except Exception as e:
+            st.error(f"エラーが発生しました: {e}")
