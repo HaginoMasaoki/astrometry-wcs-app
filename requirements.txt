@@ -1,0 +1,7 @@
+streamlit
+requests
+numpy
+pillow
+matplotlib
+astropy
+skyfield
