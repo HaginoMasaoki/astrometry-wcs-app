@@ -127,7 +127,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 4. FITS保存 & アノテーション描画
+# 4. FITS保存 & アノテーション描画・解析
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -218,6 +218,17 @@ def draw_annotations(image, wcs, output_plot_path):
     plt.savefig(output_plot_path, dpi=150)
     plt.close()
 
+    # 推定限界等級の算出（画像範囲内に存在する星表の最暗等級）
+    faintest_mag_str = "判定不能"
+    if len(filtered_df) > 0:
+        inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
+        visible_mags = filtered_df['magnitude'].values[inside_mask]
+        if len(visible_mags) > 0:
+            faintest_mag = np.max(visible_mags)
+            faintest_mag_str = f"{faintest_mag:.1f} 等級（HIP星表基準）"
+
+    return faintest_mag_str
+
 # ==========================================
 # 5. Streamlit メイン UI
 # ==========================================
@@ -258,34 +269,23 @@ if uploaded_file is not None:
             output_plot_path = "annotated_sky.png"
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
-            
-            # 中心座標計算
+
+            status_placeholder.info("アノテーション画像を生成中...")
+            faintest_mag_str = draw_annotations(image, wcs, output_plot_path)
+
+            status_placeholder.success("全処理が完了しました！")
+
+            # 視野角（FOV）・中心座標の計算
             width, height = image.size
             center_coord = wcs.pixel_to_world(width / 2, height / 2)
             ra_str = center_coord.ra.to_string(unit=u.hour, sep='hms', precision=1)
             dec_str = center_coord.dec.to_string(unit=u.deg, sep='dms', precision=1)
 
-            status_placeholder.info("アノテーション画像を生成中...")
-            draw_annotations(image, wcs, output_plot_path)
+            coord_tl = wcs.pixel_to_world(0, height)
+            coord_tr = wcs.pixel_to_world(width, height)
+            coord_bl = wcs.pixel_to_world(0, 0)
+            coord_br = wcs.pixel_to_world(width, 0)
 
-            status_placeholder.success("全処理が完了しました！")
-
-            # 結果表示
-            with col2:
-                st.image(output_plot_path, caption="解析結果 (アノテーション付き)", use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("解析データ")
-            st.write(f"**撮影中心座標:** 赤経 (RA): `{ra_str}` / 赤緯 (Dec): `{dec_str}`")
-
-            # FITSファイルのダウンロードボタン（文字化けを防ぐため標準テキストに変更）
-            with open(output_fits_path, "rb") as f:
-                st.download_button(
-                    label="WCS入り FITS ファイルをダウンロード",
-                    data=f,
-                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
-                    mime="application/fits"
-                )
-
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
+            fov_w_deg = (coord_bl.separation(coord_br).deg + coord_tl.separation(coord_tr).deg) / 2.0
+            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_tr).deg) / 2.0
+            fov_diag_deg = coord_bl
