@@ -65,12 +65,21 @@ CONST_JA_MAP = {
 }
 
 # ==========================================
-# 3. Skyfield ＋ Stellarium データロード (キャッシュ化)
+# 3. Skyfield ＋ Stellarium データロード (タイムアウト対策・リトライ付き)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_stellarium_constellations():
-    with load.open(hipparcos.URL) as f:
-        stars_df = hipparcos.load_dataframe(f)
+    # 接続タイムアウト対策としてリトライ処理を導入
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with load.open(hipparcos.URL) as f:
+                stars_df = hipparcos.load_dataframe(f)
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise Exception(f"Hipparcos星表のダウンロードに失敗しました (タイムアウト): {e}")
+            time.sleep(2)
 
     url = 'https://raw.githubusercontent.com/Stellarium/stellarium/eb47095a9282cf6b981f6e37fe1ea3a3ae0fd167/skycultures/modern_st/constellationship.fab'
     with load.open(url) as f:
@@ -209,7 +218,6 @@ def draw_constellations(image, wcs, output_plot_path):
     
     ax.imshow(image, origin='lower')
 
-    # 星座線と日本語・英語並記の星座名描画
     for const_code, edges in constellations:
         const_x_list = []
         const_y_list = []
@@ -243,7 +251,6 @@ def draw_constellations(image, wcs, output_plot_path):
                     bbox=dict(boxstyle='round,pad=0.2', fc='black', alpha=0.6, ec='none')
                 )
 
-    # 標準星のリストアップとマーカー描画
     star_list = []
     if len(filtered_df) > 0:
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
@@ -285,7 +292,7 @@ def draw_constellations(image, wcs, output_plot_path):
 # 6. Streamlit メイン UI
 # ==========================================
 st.title("Astrometry.net Cloud Plate Solver")
-st.write("Astrometry.net APIを利用してPlate Solvingを行い、グリッド付きの星座線・日本語星座名を重ね合わせた画像を生成します。")
+st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、グリッド付きの星座線・日本語星座名を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
 
@@ -343,7 +350,7 @@ if uploaded_file is not None:
             coord_br = wcs.pixel_to_world(width, 0)
 
             fov_w_deg = (coord_bl.separation(coord_br).deg + coord_tl.separation(coord_tr).deg) / 2.0
-            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_br).deg) / 2.0 # adjusted
+            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_br).deg) / 2.0
             fov_diag_deg = coord_bl.separation(coord_tr).deg
             scale_arcsec = (fov_w_deg * 3600.0) / width
 
@@ -393,4 +400,31 @@ if uploaded_file is not None:
         st.markdown("---")
         st.subheader("ダウンロード")
 
-        d_col1, d_col
+        d_col1, d_col2, d_col3 = st.columns(3)
+
+        with d_col1:
+            with open(st.session_state.output_plot_path, "rb") as f:
+                st.download_button(
+                    label="星座付き画像をダウンロード (PNG)",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_constellations.png",
+                    mime="image/png"
+                )
+
+        with d_col2:
+            with open(st.session_state.output_fits_path, "rb") as f:
+                st.download_button(
+                    label="WCS入り FITS をダウンロード",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
+                    mime="application/fits"
+                )
+
+        with d_col3:
+            with open(st.session_state.output_hdr_path, "rb") as f:
+                st.download_button(
+                    label="WCS ヘッダー情報をダウンロード (TXT)",
+                    data=f,
+                    file_name=f"{Path(uploaded_file.name).stem}_header.txt",
+                    mime="text/plain"
+                )
