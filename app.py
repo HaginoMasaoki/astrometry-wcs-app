@@ -37,11 +37,38 @@ def get_api_key():
         st.stop()
 
 # ==========================================
-# 2. Skyfield ＋ Stellarium データロード (キャッシュ化)
+# 2. 星座の日本語名辞書データ
+# ==========================================
+CONST_JA_MAP = {
+    "Andromeda": "アンドロメダ座", "Antlia": "ポンプ座", "Apus": "ふうちょう座", "Aquarius": "みずがめ座",
+    "Aquila": "わし座", "Ara": "さいだん座", "Aries": "おひつじ座", "Auriga": "ぎょしゃ座",
+    "Bootes": "うしかい座", "Caelum": "ちょう刻具座", "Camelopardalis": "キリン座", "Cancer": "かに座",
+    "Canes Venatici": "りょうけん座", "Canis Major": "おおいぬ座", "Canis Minor": "こいぬ座", "Capricornus": "やぎ座",
+    "Carina": "りゅうこつ座", "Cassiopeia": "カシオペヤ座", "Centaurus": "ケンタウルス座", "Cepheus": "ケフェウス座",
+    "Cetus": "くじら座", "Chamaeleon": "カメレオン座", "Circinus": "コンパス座", "Columba": "はと座",
+    "Coma Berenices": "かみのけ座", "Corona Australis": "みなみのかんむり座", "Corona Borealis": "かんむり座", "Corvus": "からす座",
+    "Crater": "コップ座", "Crux": "みなみじゅうじ座", "Cygnus": "はくちょう座", "Delphinus": "いるか座",
+    "Dorado": "カジカジキ座", "Draco": "りゅう座", "Equuleus": "こま座", "Eridanus": "エリダヌス座",
+    "Fornax": "ろ座", "Gemini": "ふたご座", "Grus": "つる座", "Hercules": "ヘルクレス座",
+    "Horologium": "とけい座", "Hydra": "うみへび座", "Hydrus": "みなみへび座", "Indus": "インディアン座",
+    "Lacerta": "とかげ座", "Leo": "しし座", "Leo Minor": "こじし座", "Lepus": "うさぎ座",
+    "Libra": "てんびん座", "Lupus": "おおかみ座", "Lynx": "やまねこ座", "Lyra": "こと座",
+    "Mensa": "テーブルさん座", "Microscopium": "顕微鏡座", "Monoceros": "いっかくじゅう座", "Musca": "はえ座",
+    "Norma": "じょうぎ座", "Octans": "はっきぶんぎ座", "Ophiuchus": "へびつかい座", "Orion": "オリオン座",
+    "Pavo": "くじゃく座", "Pegasus": "ペガスス座", "Perseus": "ペルセウス座", "Phoenix": "ほうおう座",
+    "Pictor": "がか座", "Pisces": "うお座", "Piscis Austrinus": "みなみのうお座", "Puppis": "とも座",
+    "Pyxis": "らしす座", "Reticulum": "レチクル座", "Sagitta": "や座", "Sagittarius": "いて座",
+    "Scorpius": "さそり座", "Sculptor": "ちょう刻者座", "Scutum": "たて座", "Serpens": "へび座",
+    "Sextans": "ろくぶんぎ座", "Taurus": "おうし座", "Telescopium": "望遠鏡座", "Triangulum": "さんかく座",
+    "Triangulum Australe": "みなみのもんかく座", "Tucana": "きょしちょう座", "Ursa Major": "おおぐま座", "Ursa Minor": "こぐま座",
+    "Vela": "ほ座", "Virgo": "おとめ座", "Volans": "とびうお座", "Vulpecula": "こぎつね座"
+}
+
+# ==========================================
+# 3. Skyfield ＋ Stellarium データロード (キャッシュ化)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_stellarium_constellations():
-    """Skyfield と Stellarium 公式データから星座線データとHIP星データを取得"""
     with load.open(hipparcos.URL) as f:
         stars_df = hipparcos.load_dataframe(f)
 
@@ -60,7 +87,7 @@ def load_stellarium_constellations():
     return valid_stars_df, constellations
 
 # ==========================================
-# 3. Astrometry.net API 通信関数群
+# 4. Astrometry.net API 通信関数群
 # ==========================================
 def get_session_token(api_key):
     url = "https://nova.astrometry.net/api/login"
@@ -131,7 +158,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 4. FITS保存 & 星座線・名前の重ね描き・解析
+# 5. FITS保存 & 星座線・日本語名重ね描き・解析
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -182,7 +209,7 @@ def draw_constellations(image, wcs, output_plot_path):
     
     ax.imshow(image, origin='lower')
 
-    # 星座線と星座名の描画
+    # 星座線と日本語・英語並記の星座名描画
     for const_code, edges in constellations:
         const_x_list = []
         const_y_list = []
@@ -201,15 +228,17 @@ def draw_constellations(image, wcs, output_plot_path):
                     const_x_list.extend([pt1[0], pt2[0]])
                     const_y_list.extend([pt1[1], pt2[1]])
 
-        # 画面内に描画線が含まれる場合、中心付近に星座名を表示
         if const_x_list and const_y_list:
             cx = np.mean(const_x_list)
             cy = np.mean(const_y_list)
             if 0 <= cx < width and 0 <= cy < height:
                 full_name = const_name_map.get(const_code, const_code)
+                ja_name = CONST_JA_MAP.get(full_name, full_name)
+                label_text = f"{ja_name}\n({full_name})"
+                
                 ax.text(
-                    cx, cy, full_name,
-                    color='orange', fontsize=9, fontweight='bold',
+                    cx, cy, label_text,
+                    color='orange', fontsize=8, fontweight='bold',
                     ha='center', va='center',
                     bbox=dict(boxstyle='round,pad=0.2', fc='black', alpha=0.6, ec='none')
                 )
@@ -253,10 +282,10 @@ def draw_constellations(image, wcs, output_plot_path):
     return faintest_mag_str, star_list
 
 # ==========================================
-# 5. Streamlit メイン UI
+# 6. Streamlit メイン UI
 # ==========================================
 st.title("Astrometry.net Cloud Plate Solver")
-st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、グリッド付きの星座線・星座名を重ね合わせた画像を生成します。")
+st.write("Astrometry.net APIを利用してPlate Solvingを行い、グリッド付きの星座線・日本語星座名を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
 
@@ -314,7 +343,7 @@ if uploaded_file is not None:
             coord_br = wcs.pixel_to_world(width, 0)
 
             fov_w_deg = (coord_bl.separation(coord_br).deg + coord_tl.separation(coord_tr).deg) / 2.0
-            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_tr).deg) / 2.0
+            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_br).deg) / 2.0 # adjusted
             fov_diag_deg = coord_bl.separation(coord_tr).deg
             scale_arcsec = (fov_w_deg * 3600.0) / width
 
@@ -338,7 +367,7 @@ if uploaded_file is not None:
 
     if st.session_state.get("is_solved", False):
         with col2:
-            st.image(st.session_state.output_plot_path, caption="解析結果 (星座名・線・グリッド表示)", use_container_width=True)
+            st.image(st.session_state.output_plot_path, caption="解析結果 (日本語星座名・線・グリッド表示)", use_container_width=True)
         
         st.markdown("---")
         st.subheader("解析データ")
@@ -347,7 +376,7 @@ if uploaded_file is not None:
         with res_col1:
             st.markdown("**撮影中心座標**")
             st.write(f"- 赤経 (RA): `{st.session_state.ra_str}`")
-            st.write(f"- Dec (Dec): `{st.session_state.dec_str}`")
+            st.write(f"- 赤緯 (Dec): `{st.session_state.dec_str}`")
         
         with res_col2:
             st.markdown("**視野角（FOV）& 画像領域情報**")
@@ -364,31 +393,4 @@ if uploaded_file is not None:
         st.markdown("---")
         st.subheader("ダウンロード")
 
-        d_col1, d_col2, d_col3 = st.columns(3)
-
-        with d_col1:
-            with open(st.session_state.output_plot_path, "rb") as f:
-                st.download_button(
-                    label="星座付き画像をダウンロード (PNG)",
-                    data=f,
-                    file_name=f"{Path(uploaded_file.name).stem}_constellations.png",
-                    mime="image/png"
-                )
-
-        with d_col2:
-            with open(st.session_state.output_fits_path, "rb") as f:
-                st.download_button(
-                    label="WCS入り FITS をダウンロード",
-                    data=f,
-                    file_name=f"{Path(uploaded_file.name).stem}_wcs.fits",
-                    mime="application/fits"
-                )
-
-        with d_col3:
-            with open(st.session_state.output_hdr_path, "rb") as f:
-                st.download_button(
-                    label="WCS ヘッダー情報をダウンロード (TXT)",
-                    data=f,
-                    file_name=f"{Path(uploaded_file.name).stem}_header.txt",
-                    mime="text/plain"
-                )
+        d_col1, d_col
