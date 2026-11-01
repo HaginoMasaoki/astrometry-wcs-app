@@ -15,7 +15,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs.wcs import FITSFixedWarning
 
 # Skyfield 関連
-from skyfield.api import load, load_constellation_names
+from skyfield.api import load
 from skyfield.data import hipparcos, stellarium
 
 # 警告メッセージの抑制
@@ -37,41 +37,23 @@ def get_api_key():
         st.stop()
 
 # ==========================================
-# 2. 高速キャッシュ対応のデータロード関数
+# 2. Skyfield ＋ Stellarium データロード (キャッシュ化)
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_hipparcos_and_constellations():
-    """ヒッパルコス星表と星座データをロードし、一度キャッシュする"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            with load.open(hipparcos.URL) as f:
-                stars_df = hipparcos.load_dataframe(f)
-            break
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise Exception(f"Hipparcos星表のダウンロードに失敗しました: {e}")
-            time.sleep(2)
+def load_stellarium_constellations():
+    """Skyfield と Stellarium 公式データから星座線ペアとHIP星データを取得"""
+    with load.open(hipparcos.URL) as f:
+        stars_df = hipparcos.load_dataframe(f)
 
     url = 'https://raw.githubusercontent.com/Stellarium/stellarium/eb47095a9282cf6b981f6e37fe1ea3a3ae0fd167/skycultures/modern_st/constellationship.fab'
     with load.open(url) as f:
-        constellations = list(stellarium.parse_constellations(f))
+        constellations = stellarium.parse_constellations(f)
 
-    all_hip_ids = set()
-    for name, edges in constellations:
-        for h1, h2 in edges:
-            all_hip_ids.add(h1)
-            all_hip_ids.add(h2)
-            
-    valid_stars_df = stars_df.loc[stars_df.index.intersection(list(all_hip_ids))].copy()
-    
-    coords = SkyCoord(
-        ra=valid_stars_df['ra_hours'].values * 15.0 * u.deg,
-        dec=valid_stars_df['dec_degrees'].values * u.deg,
-        frame='icrs'
-    )
-    
-    return valid_stars_df, coords, constellations
+    edges = [edge for name, edges in constellations for edge in edges]
+    hip_ids = sorted(list(set(sum(edges, ()))))
+    valid_stars_df = stars_df.loc[stars_df.index.intersection(hip_ids)].copy()
+
+    return valid_stars_df, edges
 
 # ==========================================
 # 3. Astrometry.net API 通信関数群
@@ -145,7 +127,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 4. FITS保存 & 星座線・標準星描画処理
+# 4. FITS保存 & 星座線の重ね描き・解析 (グリッド・軸付き)
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -159,17 +141,25 @@ def save_as_fits(image, wcs_header_str, output_fits_path):
     return wcs
 
 def format_wcs_header_to_lines(header_str):
+    """FITSヘッダーの文字列を80文字ごとに分割して改行を入れる"""
+    # 80文字ずつのブロックに分割してリスト内包表記で改行を結合
     lines = [header_str[i:i+80] for i in range(0, len(header_str), 80)]
     return "\n".join(lines)
 
 def draw_constellations(image, wcs, output_plot_path):
     width, height = image.size
-    stars_df, all_coords, constellations = load_hipparcos_and_constellations()
+    stars_df, edges = load_stellarium_constellations()
 
     center_coord = wcs.pixel_to_world(width / 2, height / 2)
     corner_coord = wcs.pixel_to_world(0, 0)
     radius = center_coord.separation(corner_coord) * 1.5
 
+    all_coords = SkyCoord(
+        ra=stars_df['ra_hours'].values * 15.0 * u.deg,
+        dec=stars_df['dec_degrees'].values * u.deg,
+        frame='icrs'
+    )
+    
     sep = center_coord.separation(all_coords)
     near_mask = sep < radius
     filtered_df = stars_df[near_mask].copy()
@@ -188,21 +178,18 @@ def draw_constellations(image, wcs, output_plot_path):
     
     ax.imshow(image, origin='lower')
 
-    # 星座線の描画 (シアン色)
-    for const_code, edges in constellations:
-        for h1, h2 in edges:
-            if h1 in hip_to_pix and h2 in hip_to_pix:
-                pt1 = hip_to_pix[h1]
-                pt2 = hip_to_pix[h2]
+    for h1, h2 in edges:
+        if h1 in hip_to_pix and h2 in hip_to_pix:
+            pt1 = hip_to_pix[h1]
+            pt2 = hip_to_pix[h2]
 
-                if (0 <= pt1[0] < width and 0 <= pt1[1] < height) or \
-                   (0 <= pt2[0] < width and 0 <= pt2[1] < height):
-                    ax.plot(
-                        [pt1[0], pt2[0]], [pt1[1], pt2[1]], 
-                        color='cyan', linestyle='-', linewidth=1.2, alpha=0.75
-                    )
+            if (0 <= pt1[0] < width and 0 <= pt1[1] < height) or \
+               (0 <= pt2[0] < width and 0 <= pt2[1] < height):
+                ax.plot(
+                    [pt1[0], pt2[0]], [pt1[1], pt2[1]], 
+                    color='cyan', linestyle='-', linewidth=1.2, alpha=0.75
+                )
 
-    # 標準星のマーカー描画 (黄色いリング)
     star_list = []
     if len(filtered_df) > 0:
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
@@ -244,12 +231,13 @@ def draw_constellations(image, wcs, output_plot_path):
 # 5. Streamlit メイン UI
 # ==========================================
 st.title("Astrometry.net Cloud Plate Solver")
-st.write("Astrometry.net APIを利用してPlate Solvingを行い、グリッド付きの星座線・日本語星座名を重ね合わせた画像を生成します。")
+st.write("Astrometry.net APIを利用してオンラインでプレートソルブを行い、グリッド付きの星座線を重ね合わせた画像を生成します。")
 
 api_key = get_api_key()
 
 uploaded_file = st.file_uploader("解析する星空画像を選択してください", type=["jpg", "jpeg", "png", "tif", "fits"])
 
+# ファイルが一意に変わった場合のみセッション状態をリセット
 file_id = f"{uploaded_file.name}-{uploaded_file.size}" if uploaded_file else None
 if "current_file_id" not in st.session_state or st.session_state.current_file_id != file_id:
     st.session_state.current_file_id = file_id
@@ -282,15 +270,17 @@ if uploaded_file is not None:
             output_plot_path = "constellation_sky.png"
             output_hdr_path = "wcs_header.txt"
 
+            # 80文字ごとに改行を入れてTXTファイルに保存
             formatted_header = format_wcs_header_to_lines(wcs_header_str)
             with open(output_hdr_path, "w", encoding="utf-8") as f:
                 f.write(formatted_header)
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
-            status_placeholder.info("星座線・グリッド付き画像を生成中...")
+            status_placeholder.info("星座重ね合わせ画像を生成中...")
             faintest_mag_str, star_list = draw_constellations(image, wcs, output_plot_path)
 
+            # 視野角（FOV）・中心座標の計算
             width, height = image.size
             center_coord = wcs.pixel_to_world(width / 2, height / 2)
             ra_str = center_coord.ra.to_string(unit=u.hour, sep='hms', precision=1)
@@ -302,10 +292,11 @@ if uploaded_file is not None:
             coord_br = wcs.pixel_to_world(width, 0)
 
             fov_w_deg = (coord_bl.separation(coord_br).deg + coord_tl.separation(coord_tr).deg) / 2.0
-            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_br).deg) / 2.0
+            fov_h_deg = (coord_bl.separation(coord_tl).deg + coord_br.separation(coord_tr).deg) / 2.0
             fov_diag_deg = coord_bl.separation(coord_tr).deg
             scale_arcsec = (fov_w_deg * 3600.0) / width
 
+            # 結果を session_state に保存
             st.session_state.is_solved = True
             st.session_state.ra_str = ra_str
             st.session_state.dec_str = dec_str
@@ -324,9 +315,10 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
 
+    # 解決済みの場合はボタン以外（ダウンロード等）でも状態を維持して表示
     if st.session_state.get("is_solved", False):
         with col2:
-            st.image(st.session_state.output_plot_path, caption="解析結果 (星座線・グリッド表示)", use_container_width=True)
+            st.image(st.session_state.output_plot_path, caption="解析結果 (グリッド・星座線表示)", use_container_width=True)
         
         st.markdown("---")
         st.subheader("解析データ")
