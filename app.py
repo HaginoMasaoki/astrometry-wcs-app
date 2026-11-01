@@ -15,8 +15,8 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs.wcs import FITSFixedWarning
 
 # Skyfield 関連
-from skyfield.api import load
-from skyfield.data import stellarium
+from skyfield.api import load, load_constellation_names
+from skyfield.data import hipparcos, stellarium
 
 # 警告メッセージの抑制
 warnings.simplefilter('ignore', category=FITSFixedWarning)
@@ -37,45 +37,44 @@ def get_api_key():
         st.stop()
 
 # ==========================================
-# 2. 星座の日本語名辞書データ
-# ==========================================
-CONST_JA_MAP = {
-    "Andromeda": "アンドロメダ座", "Antlia": "ポンプ座", "Apus": "ふうちょう座", "Aquarius": "みずがめ座",
-    "Aquila": "わし座", "Ara": "さいだん座", "Aries": "おひつじ座", "Auriga": "ぎょしゃ座",
-    "Bootes": "うしかい座", "Caelum": "ちょう刻具座", "Camelopardalis": "キリン座", "Cancer": "かに座",
-    "Canes Venatici": "りょうけん座", "Canis Major": "おおいぬ座", "Canis Minor": "こいぬ座", "Capricornus": "やぎ座",
-    "Carina": "りゅうこつ座", "Cassiopeia": "カシオペヤ座", "Centaurus": "ケンタウルス座", "Cepheus": "ケフェウス座",
-    "Cetus": "くじら座", "Chamaeleon": "カメレオン座", "Circinus": "コンパス座", "Columba": "はと座",
-    "Coma Berenices": "かみのけ座", "Corona Australis": "みなみのかんむり座", "Corona Borealis": "かんむり座", "Corvus": "からす座",
-    "Crater": "コップ座", "Crux": "みなみじゅうじ座", "Cygnus": "はくちょう座", "Delphinus": "いるか座",
-    "Dorado": "カジカジキ座", "Draco": "りゅう座", "Equuleus": "こま座", "Eridanus": "エリダヌス座",
-    "Fornax": "ろ座", "Gemini": "ふたご座", "Grus": "つる座", "Hercules": "ヘルクレス座",
-    "Horologium": "とけい座", "Hydra": "うみへび座", "Hydrus": "みなみへび座", "Indus": "インディアン座",
-    "Lacerta": "とかげ座", "Leo": "しし座", "Leo Minor": "こじし座", "Lepus": "うさぎ座",
-    "Libra": "てんびん座", "Lupus": "おおかみ座", "Lynx": "やまねこ座", "Lyra": "こと座",
-    "Mensa": "テーブルさん座", "Microscopium": "顕微鏡座", "Monoceros": "いっかくじゅう座", "Musca": "はえ座",
-    "Norma": "じょうぎ座", "Octans": "はっきぶんぎ座", "Ophiuchus": "へびつかい座", "Orion": "オリオン座",
-    "Pavo": "くじゃく座", "Pegasus": "ペガスス座", "Perseus": "ペルセウス座", "Phoenix": "ほうおう座",
-    "Pictor": "がか座", "Pisces": "うお座", "Piscis Austrinus": "みなみのうお座", "Puppis": "とも座",
-    "Pyxis": "らしす座", "Reticulum": "レチクル座", "Sagitta": "や座", "Sagittarius": "いて座",
-    "Scorpius": "さそり座", "Sculptor": "ちょう刻者座", "Scutum": "たて座", "Serpens": "へび座",
-    "Sextans": "ろくぶんぎ座", "Taurus": "おうし座", "Telescopium": "望遠鏡座", "Triangulum": "さんかく座",
-    "Triangulum Australe": "みなみのもんかく座", "Tucana": "きょしちょう座", "Ursa Major": "おおぐま座", "Ursa Minor": "こぐま座",
-    "Vela": "ほ座", "Virgo": "おとめ座", "Volans": "とびうお座", "Vulpecula": "こぎつね座"
-}
-
-# ==========================================
-# 3. Stellarium の星座線データをキャッシュロード
+# 2. 高速キャッシュ対応のデータロード関数
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_stellarium_constellations():
+def load_hipparcos_and_constellations():
+    """ヒッパルコス星表と星座データをロードし、一度キャッシュする"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with load.open(hipparcos.URL) as f:
+                stars_df = hipparcos.load_dataframe(f)
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise Exception(f"Hipparcos星表のダウンロードに失敗しました: {e}")
+            time.sleep(2)
+
     url = 'https://raw.githubusercontent.com/Stellarium/stellarium/eb47095a9282cf6b981f6e37fe1ea3a3ae0fd167/skycultures/modern_st/constellationship.fab'
     with load.open(url) as f:
         constellations = list(stellarium.parse_constellations(f))
-    return constellations
+
+    all_hip_ids = set()
+    for name, edges in constellations:
+        for h1, h2 in edges:
+            all_hip_ids.add(h1)
+            all_hip_ids.add(h2)
+            
+    valid_stars_df = stars_df.loc[stars_df.index.intersection(list(all_hip_ids))].copy()
+    
+    coords = SkyCoord(
+        ra=valid_stars_df['ra_hours'].values * 15.0 * u.deg,
+        dec=valid_stars_df['dec_degrees'].values * u.deg,
+        frame='icrs'
+    )
+    
+    return valid_stars_df, coords, constellations
 
 # ==========================================
-# 4. Astrometry.net API 通信関数群
+# 3. Astrometry.net API 通信関数群
 # ==========================================
 def get_session_token(api_key):
     url = "https://nova.astrometry.net/api/login"
@@ -146,7 +145,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 5. FITS保存 & 星座線・グリッド描画
+# 4. FITS保存 & 星座線・標準星描画処理
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -165,25 +164,65 @@ def format_wcs_header_to_lines(header_str):
 
 def draw_constellations(image, wcs, output_plot_path):
     width, height = image.size
-    constellations = load_stellarium_constellations()
+    stars_df, all_coords, constellations = load_hipparcos_and_constellations()
+
+    center_coord = wcs.pixel_to_world(width / 2, height / 2)
+    corner_coord = wcs.pixel_to_world(0, 0)
+    radius = center_coord.separation(corner_coord) * 1.5
+
+    sep = center_coord.separation(all_coords)
+    near_mask = sep < radius
+    filtered_df = stars_df[near_mask].copy()
+    filtered_coords = all_coords[near_mask]
+
+    if len(filtered_coords) > 0:
+        raw_x, raw_y = wcs.world_to_pixel(filtered_coords)
+        pix_x = raw_x
+        pix_y = height - raw_y  # 上下軸反転の補正
+        hip_to_pix = {hip_id: (x, y) for hip_id, x, y in zip(filtered_df.index, pix_x, pix_y)}
+    else:
+        hip_to_pix = {}
 
     fig = plt.figure(figsize=(10, 10 * (height / width)))
     ax = fig.add_subplot(111, projection=wcs)
     
     ax.imshow(image, origin='lower')
 
-    # 星座線の描画（簡易的なWCS位置変換による描画）
-    # ※外部星表を使わず、Stellariumの定義データを安全に描画します
+    # 星座線の描画 (シアン色)
     for const_code, edges in constellations:
         for h1, h2 in edges:
-            # 結線データをシミュレートして安全にラインを描画
-            pass
+            if h1 in hip_to_pix and h2 in hip_to_pix:
+                pt1 = hip_to_pix[h1]
+                pt2 = hip_to_pix[h2]
+
+                if (0 <= pt1[0] < width and 0 <= pt1[1] < height) or \
+                   (0 <= pt2[0] < width and 0 <= pt2[1] < height):
+                    ax.plot(
+                        [pt1[0], pt2[0]], [pt1[1], pt2[1]], 
+                        color='cyan', linestyle='-', linewidth=1.2, alpha=0.75
+                    )
+
+    # 標準星のマーカー描画 (黄色いリング)
+    star_list = []
+    if len(filtered_df) > 0:
+        inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
+        bright_mask = inside_mask & (filtered_df['magnitude'].values < 4.0)
+
+        ax.scatter(
+            pix_x[bright_mask], pix_y[bright_mask], 
+            edgecolor='yellow', facecolor='none', s=45, linewidth=1.0
+        )
+
+        for hip_id, vmag in zip(
+            filtered_df.index[bright_mask], 
+            filtered_df['magnitude'].values[bright_mask]
+        ):
+            star_list.append(f"HIP {hip_id} ({vmag:.1f}m)")
 
     ax.set_xlim(0, width)
     ax.set_ylim(0, height)
     
-    # 座標グリッドの描画
-    ax.coords.grid(True, color='cyan', alpha=0.5, linestyle='solid')
+    ax.coords.grid(True, color='white', alpha=0.3, linestyle='solid')
     ax.coords[0].set_axislabel('RA (J2000)')
     ax.coords[1].set_axislabel('Dec (J2000)')
     
@@ -191,8 +230,18 @@ def draw_constellations(image, wcs, output_plot_path):
     plt.savefig(output_plot_path, dpi=150)
     plt.close()
 
+    faintest_mag_str = "判定不能"
+    if len(filtered_df) > 0:
+        inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
+        visible_mags = filtered_df['magnitude'].values[inside_mask]
+        if len(visible_mags) > 0:
+            faintest_mag = np.max(visible_mags)
+            faintest_mag_str = f"{faintest_mag:.1f} 等級（HIP星表基準）"
+
+    return faintest_mag_str, star_list
+
 # ==========================================
-# 6. Streamlit メイン UI
+# 5. Streamlit メイン UI
 # ==========================================
 st.title("Astrometry.net Cloud Plate Solver")
 st.write("Astrometry.net APIを利用してPlate Solvingを行い、グリッド付きの星座線・日本語星座名を重ね合わせた画像を生成します。")
@@ -239,8 +288,8 @@ if uploaded_file is not None:
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
-            status_placeholder.info("星座線・グリッド画像を生成中...")
-            draw_constellations(image, wcs, output_plot_path)
+            status_placeholder.info("星座線・グリッド付き画像を生成中...")
+            faintest_mag_str, star_list = draw_constellations(image, wcs, output_plot_path)
 
             width, height = image.size
             center_coord = wcs.pixel_to_world(width / 2, height / 2)
@@ -264,6 +313,8 @@ if uploaded_file is not None:
             st.session_state.fov_h_deg = fov_h_deg
             st.session_state.fov_diag_deg = fov_diag_deg
             st.session_state.scale_arcsec = scale_arcsec
+            st.session_state.faintest_mag_str = faintest_mag_str
+            st.session_state.star_list = star_list
             st.session_state.output_plot_path = output_plot_path
             st.session_state.output_fits_path = output_fits_path
             st.session_state.output_hdr_path = output_hdr_path
@@ -290,6 +341,13 @@ if uploaded_file is not None:
             st.markdown("**視野角（FOV）& 画像領域情報**")
             st.write(f"- 視野サイズ: `{st.session_state.fov_w_deg:.2f}° × {st.session_state.fov_h_deg:.2f}°` (対角: `{st.session_state.fov_diag_deg:.2f}°`)")
             st.write(f"- ピクセルスケール: `{st.session_state.scale_arcsec:.2f} arcsec/pixel`")
+            st.write(f"- 推定限界等級: `{st.session_state.faintest_mag_str}`")
+
+        st.markdown("**画角内の主要標準星 (4.0等星以上)**")
+        if st.session_state.star_list:
+            st.text("\n".join(st.session_state.star_list))
+        else:
+            st.write("画角内に該当する主要標準星はありません。")
 
         st.markdown("---")
         st.subheader("ダウンロード")
