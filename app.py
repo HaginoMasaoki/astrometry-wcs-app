@@ -5,7 +5,6 @@ from pathlib import Path
 import requests
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
 import streamlit as st
 
 from astropy.io import fits
@@ -65,20 +64,13 @@ CONST_JA_MAP = {
 }
 
 # ==========================================
-# 3. キャッシュ対応データロード (星座の代表中心を事前計算)
+# 3. 超高速キャッシュ対応データロード
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_hipparcos_and_constellation_centers():
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            with load.open(hipparcos.URL) as f:
-                stars_df = hipparcos.load_dataframe(f)
-            break
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise Exception(f"Hipparcos星表のダウンロードに失敗しました: {e}")
-            time.sleep(2)
+def load_cached_astronomical_data():
+    """初回のみデータをロードしてキャッシュ化し、numpy配列化して高速化する"""
+    with load.open(hipparcos.URL) as f:
+        stars_df = hipparcos.load_dataframe(f)
 
     url = 'https://raw.githubusercontent.com/Stellarium/stellarium/eb47095a9282cf6b981f6e37fe1ea3a3ae0fd167/skycultures/modern_st/constellationship.fab'
     with load.open(url) as f:
@@ -92,17 +84,20 @@ def load_hipparcos_and_constellation_centers():
             
     valid_stars_df = stars_df.loc[stars_df.index.intersection(list(all_hip_ids))].copy()
     
-    coords = SkyCoord(
-        ra=valid_stars_df['ra_hours'].values * 15.0 * u.deg,
-        dec=valid_stars_df['dec_degrees'].values * u.deg,
-        frame='icrs'
-    )
-    hip_to_coord = {hip: coord for hip, coord in zip(valid_stars_df.index, coords)}
+    ra_vals = valid_stars_df['ra_hours'].values * 15.0
+    dec_vals = valid_stars_df['dec_degrees'].values
+    mag_vals = valid_stars_df['magnitude'].values
+    hip_indices = valid_stars_df.index.values
+
+    coords = SkyCoord(ra=ra_vals * u.deg, dec=dec_vals * u.deg, frame='icrs')
+    hip_to_coord = {hip: coord for hip, coord in zip(hip_indices, coords)}
 
     const_name_map = dict(load_constellation_names())
     
-    # 各星座の重心（中心座標）を事前計算
-    constellation_centers = {}
+    # 星座ごとの代表座標（numpy配列用）を構築
+    const_names = []
+    const_coords_list = []
+    
     for const_code, edges in constellations:
         c_coords = []
         for h1, h2 in edges:
@@ -111,13 +106,15 @@ def load_hipparcos_and_constellation_centers():
             if h2 in hip_to_coord:
                 c_coords.append(hip_to_coord[h2])
         if c_coords:
-            # 簡易的にRA/Decの平均で中心を算出
             mean_ra = np.mean([c.ra.deg for c in c_coords])
             mean_dec = np.mean([c.dec.deg for c in c_coords])
             full_name = const_name_map.get(const_code, const_code)
-            constellation_centers[full_name] = SkyCoord(ra=mean_ra * u.deg, dec=mean_dec * u.deg, frame='icrs')
+            const_names.append(full_name)
+            const_coords_list.append(SkyCoord(ra=mean_ra * u.deg, dec=mean_dec * u.deg, frame='icrs'))
 
-    return valid_stars_df, coords, constellation_centers
+    const_sky_coords = SkyCoord(ra=[c.ra.deg for c in const_coords_list] * u.deg, dec=[c.dec.deg for c in const_coords_list] * u.deg, frame='icrs')
+
+    return hip_indices, coords, mag_vals, const_names, const_sky_coords
 
 # ==========================================
 # 4. Astrometry.net API 通信関数群
@@ -191,7 +188,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 5. FITS保存 & 高速解析処理
+# 5. FITS保存 & 超高速解析処理
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -210,48 +207,51 @@ def format_wcs_header_to_lines(header_str):
 
 def analyze_sky_content(image, wcs):
     width, height = image.size
-    stars_df, all_coords, constellation_centers = load_hipparcos_and_constellation_centers()
+    hip_indices, all_coords, mag_vals, const_names, const_sky_coords = load_cached_astronomical_data()
 
     center_coord = wcs.pixel_to_world(width / 2, height / 2)
     corner_coord = wcs.pixel_to_world(0, 0)
     radius = center_coord.separation(corner_coord) * 1.5
 
-    # 1. 視野内の標準星抽出
+    # 1. ベクトル演算による超高速な視野内星の抽出
     sep = center_coord.separation(all_coords)
     near_mask = sep < radius
-    filtered_df = stars_df[near_mask].copy()
-    filtered_coords = all_coords[near_mask]
-
+    
     star_list = []
     faintest_mag_str = "判定不能"
-    
-    if len(filtered_coords) > 0:
-        raw_x, raw_y = wcs.world_to_pixel(filtered_coords)
+
+    if np.any(near_mask):
+        sub_coords = all_coords[near_mask]
+        sub_hip = hip_indices[near_mask]
+        sub_mag = mag_vals[near_mask]
+
+        raw_x, raw_y = wcs.world_to_pixel(sub_coords)
         pix_x = raw_x
         pix_y = height - raw_y  # 上下反転補正
 
         inside_mask = (pix_x >= 0) & (pix_x < width) & (pix_y >= 0) & (pix_y < height)
-        visible_mags = filtered_df['magnitude'].values[inside_mask]
+        visible_mags = sub_mag[inside_mask]
         
         if len(visible_mags) > 0:
             faintest_mag = np.max(visible_mags)
             faintest_mag_str = f"{faintest_mag:.1f} 等級（HIP星表基準）"
 
-        bright_mask = inside_mask & (filtered_df['magnitude'].values < 4.0)
-        for hip_id, vmag in zip(
-            filtered_df.index[bright_mask], 
-            filtered_df['magnitude'].values[bright_mask]
-        ):
+        bright_mask = inside_mask & (sub_mag < 4.0)
+        for hip_id, vmag in zip(sub_hip[bright_mask], sub_mag[bright_mask]):
             star_list.append(f"HIP {hip_id} ({vmag:.1f}m)")
 
-    # 2. 視野内にある星座の判定（中心座標との距離判定）
+    # 2. ベクトル演算による超高速な視野内星座の判定
+    const_seps = center_coord.separation(const_sky_coords)
+    const_near_mask = const_seps < (radius + 15 * u.deg)
+    
     visible_constellations = []
-    for full_name, c_coord in constellation_centers.items():
-        if center_coord.separation(c_coord) < (radius + 15 * u.deg):  # 余裕を持たせた判定
+    if np.any(const_near_mask):
+        matched_consts = np.array(const_names)[const_near_mask]
+        for full_name in matched_consts:
             ja_name = CONST_JA_MAP.get(full_name, full_name)
             visible_constellations.append(f"{ja_name} ({full_name})")
 
-    return faintest_mag_str, star_list, sorted(visible_constellations)
+    return faintest_mag_str, star_list, sorted(list(set(visible_constellations)))
 
 # ==========================================
 # 6. Streamlit メイン UI
@@ -300,7 +300,7 @@ if uploaded_file is not None:
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
-            status_placeholder.info("視野内の天体・星座情報を解析中（高速処理）...")
+            status_placeholder.info("視野内の天体・星座情報を解析中（超高速処理）...")
             faintest_mag_str, star_list, const_list = analyze_sky_content(image, wcs)
 
             width, height = image.size
