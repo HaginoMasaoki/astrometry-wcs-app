@@ -65,11 +65,11 @@ CONST_JA_MAP = {
 }
 
 # ==========================================
-# 3. Skyfield ＋ Stellarium データロード (タイムアウト対策・リトライ付き)
+# 3. 高速キャッシュ対応のデータロード関数
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_stellarium_constellations():
-    # 接続タイムアウト対策としてリトライ処理を導入
+def load_hipparcos_and_constellations():
+    """ヒッパルコス星表と星座データをロードし、一度キャッシュする"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -78,7 +78,7 @@ def load_stellarium_constellations():
             break
         except Exception as e:
             if attempt == max_retries - 1:
-                raise Exception(f"Hipparcos星表のダウンロードに失敗しました (タイムアウト): {e}")
+                raise Exception(f"Hipparcos星表のダウンロードに失敗しました: {e}")
             time.sleep(2)
 
     url = 'https://raw.githubusercontent.com/Stellarium/stellarium/eb47095a9282cf6b981f6e37fe1ea3a3ae0fd167/skycultures/modern_st/constellationship.fab'
@@ -92,8 +92,14 @@ def load_stellarium_constellations():
             all_hip_ids.add(h2)
             
     valid_stars_df = stars_df.loc[stars_df.index.intersection(list(all_hip_ids))].copy()
-
-    return valid_stars_df, constellations
+    
+    coords = SkyCoord(
+        ra=valid_stars_df['ra_hours'].values * 15.0 * u.deg,
+        dec=valid_stars_df['dec_degrees'].values * u.deg,
+        frame='icrs'
+    )
+    
+    return valid_stars_df, coords, constellations
 
 # ==========================================
 # 4. Astrometry.net API 通信関数群
@@ -167,7 +173,7 @@ def get_wcs_header(job_id):
     return res.text
 
 # ==========================================
-# 5. FITS保存 & 星座線・日本語名重ね描き・解析
+# 5. FITS保存 & 高速描画処理
 # ==========================================
 def save_as_fits(image, wcs_header_str, output_fits_path):
     img_gray = image.convert('L')
@@ -181,25 +187,18 @@ def save_as_fits(image, wcs_header_str, output_fits_path):
     return wcs
 
 def format_wcs_header_to_lines(header_str):
-    """FITSヘッダーの文字列を80文字ごとに分割して改行を入れる"""
     lines = [header_str[i:i+80] for i in range(0, len(header_str), 80)]
     return "\n".join(lines)
 
 def draw_constellations(image, wcs, output_plot_path):
     width, height = image.size
-    stars_df, constellations = load_stellarium_constellations()
+    stars_df, all_coords, constellations = load_hipparcos_and_constellations()
     const_name_map = dict(load_constellation_names())
 
     center_coord = wcs.pixel_to_world(width / 2, height / 2)
     corner_coord = wcs.pixel_to_world(0, 0)
     radius = center_coord.separation(corner_coord) * 1.5
 
-    all_coords = SkyCoord(
-        ra=stars_df['ra_hours'].values * 15.0 * u.deg,
-        dec=stars_df['dec_degrees'].values * u.deg,
-        frame='icrs'
-    )
-    
     sep = center_coord.separation(all_coords)
     near_mask = sep < radius
     filtered_df = stars_df[near_mask].copy()
@@ -336,7 +335,7 @@ if uploaded_file is not None:
             
             wcs = save_as_fits(image, wcs_header_str, output_fits_path)
 
-            status_placeholder.info("星座名・線付き画像を生成中...")
+            status_placeholder.info("星座名・線付き画像を生成中（高速化処理中）...")
             faintest_mag_str, star_list = draw_constellations(image, wcs, output_plot_path)
 
             width, height = image.size
